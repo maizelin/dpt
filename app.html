@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Diabetes CDS - ADA 2025</title>
+  <script src="https://cdn.jsdelivr.net/npm/fhirclient/build/fhir-client.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { 
+      font-family: 'Microsoft JhengHei', Arial, sans-serif; 
+      background: #f0f4f8; margin: 0; padding: 20px; 
+    }
+    .container { max-width: 1100px; margin: auto; }
+    h1 { text-align: center; color: #2c3e50; }
+    .status-bar { 
+      text-align: center; background: #e8f6f3; padding: 8px; 
+      border-radius: 4px; color: #16a085; margin-bottom: 20px; 
+      display: none; 
+    }
+    .patient-selector { 
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); 
+      gap: 15px; margin-bottom: 40px; 
+    }
+    .patient-card { 
+      background: white; border-radius: 12px; padding: 20px; 
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1); cursor: pointer; 
+      transition: 0.3s; 
+    }
+    .patient-card:hover { 
+      transform: translateY(-5px); box-shadow: 0 10px 25px rgba(0,0,0,0.15); 
+    }
+    .patient-card h3 { margin: 0 0 10px 0; color: #3498db; }
+    .patient-card p { margin: 5px 0; color: #555; }
+    .content { 
+      display: none; background: white; border-radius: 12px; 
+      padding: 30px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); 
+      position: relative; 
+    }
+    .back-btn { 
+      position: absolute; top: 20px; left: 20px; background: #3498db; 
+      color: white; border: none; padding: 8px 16px; border-radius: 8px; 
+      cursor: pointer; transition: 0.3s; 
+    }
+    .back-btn:hover { background: #2980b9; }
+    canvas { max-height: 350px; width: 100%; }
+    .indicators { 
+      display: flex; justify-content: space-around; flex-wrap: wrap; 
+      gap: 20px; margin: 30px 0; 
+    }
+    .indicator-box { text-align: center; min-width: 120px; }
+    .bar { 
+      height: 40px; border-radius: 8px; line-height: 40px; 
+      color: white; font-weight: bold; font-size: 1.2em; 
+      text-shadow: 1px 1px 2px rgba(0,0,0,0.3); margin-top: 5px; 
+    }
+    .green { background: #27ae60; }
+    .yellow { background: #f39c12; }
+    .red { background: #e74c3c; }
+    .recommendations { margin-top: 30px; }
+    .rec-item { 
+      background: #f8f9fa; padding: 15px; border-left: 5px solid #3498db; 
+      margin: 10px 0; border-radius: 6px; 
+    }
+    .rec-high { border-left-color: #e74c3c; background: #fdf2f2; }
+    .rec-good { border-left-color: #27ae60; background: #f0fff4; }
+    footer { text-align: center; margin-top: 50px; color: #95a5a6; font-size: 0.9em; }
+    .fhir-loading { text-align: center; color: #3498db; font-style: italic; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🩸 Diabetes CDS - ADA 2025</h1>
+    <p style="text-align:center; color:#7f8c8d;">台灣糖尿病管理輔助工具</p>
+    
+    <div id="smartStatus" class="status-bar"></div>
+    
+    <h2 id="selectorTitle">選擇測試個案</h2>
+    <div class="patient-selector" id="patientSelector"></div>
+    
+    <div class="content" id="patientContent">
+      <button class="back-btn" id="backBtn" onclick="backToSelector()">← 返回</button>
+      
+      <h2 id="patientName" style="margin-left:40px; margin-top: 0;"></h2>
+      <p id="patientInfo" style="margin-left:40px;"></p>
+      
+      <h3 style="margin-left:40px;">HbA1c 趨勢圖</h3>
+      <canvas id="hba1cChart"></canvas>
+      
+      <h3 style="margin-left:40px;">風險指標</h3>
+      <div class="indicators" id="indicators"></div>
+      
+      <h3 style="margin-left:40px;">CDS 建議 (ADA 2025)</h3>
+      <div class="recommendations" id="recommendations"></div>
+    </div>
+    
+    <footer>THAS FHIR Sandbox 優化版 2025-12-28</footer>
+  </div>
+
+  <script>
+    let myChart = null;
+    let fhirClient = null;
+    
+    // LOINC Code 對照表
+    const LOINC_CODES = {
+      hba1c: '4548-4',  // HbA1c %
+      egfr: '48642-3',  // eGFR
+      bmi: '59574-4'    // BMI
+    };
+
+    // Demo 病人（FHIR 無資料時 fallback）
+    const testPatients = [
+      { id: '683785', name: '李大華', gender: '男', age: 45, scenario: 'HbA1c 略高', 
+        target: 7.0, latestHba1c: 7.1, egfr: 90, bmi: 27, hba1cSeries: [9.5,9.3,9.0,8.8,8.5,8.3,8.1,8.0,7.9,7.8,7.7,7.6,7.5,7.4,7.3,7.3,7.2,7.2,7.1,7.1,7.1,7.1,7.1,7.1,7.1] },
+      { id: '683813', name: '陳美玲', gender: '女', age: 62, scenario: 'CKD 3', target: 7.5, 
+        latestHba1c: 7.6, egfr: 45, bmi: 26, hba1cSeries: [8.5,8.4,8.3,8.2,8.1,8.0,7.9,7.9,7.8,7.8,7.7,7.7,7.7,7.7,7.6,7.6,7.6,7.6,7.6,7.6,7.6,7.6,7.6,7.6,7.6] },
+      { id: '683847', name: '張阿嬤', gender: '女', age: 65, scenario: '長者', target: 8.0, 
+        latestHba1c: 7.5, egfr: 55, bmi: 22, hba1cSeries: [7.8,7.7,7.6,7.7,7.5,7.6,7.8,7.7,7.6,7.5,7.6,7.7,7.5,7.6,7.4,7.5,7.6,7.7,7.6,7.5,7.6,7.7,7.5,7.6,7.5] }
+    ];
+
+    // 1. SMART 初始化 + FHIR 資料載入
+    window.onload = function() {
+      renderSelector(); // 先顯示 demo 卡片
+      
+      FHIR.oauth2.ready()
+        .then(client => {
+          fhirClient = client;
+          const statusDiv = document.getElementById('smartStatus');
+          statusDiv.style.display = 'block';
+          
+          // 顯示 SMART Context
+          statusDiv.innerHTML = `✅ SMART Context 就緒<br>Patient ID: ${client.patient?.id || 'Unknown'}<br>FHIR Server: ${client.server.url}`;
+          
+          // 如果 EHR 傳入病人，直接載入
+          if (client.patient?.id) {
+            loadPatientFromFHIR(client.patient.id);
+            document.getElementById('backBtn').style.display = 'none';
+          }
+        })
+        .catch(error => {
+          console.log('SMART 初始化失敗，使用 Demo 模式', error);
+          document.getElementById('smartStatus').innerHTML = '💡 Demo 模式（無 SMART Context）';
+        });
+    };
+
+    // 2. 從 FHIR 載入真實病人資料
+    async function loadPatientFromFHIR(patientId) {
+      try {
+        document.getElementById('smartStatus').innerHTML += '<br>🔄 從 FHIR 載入資料...';
+        
+        // 讀 Patient 基本資料
+        const patient = await fhirClient.request(`Patient/${patientId}`);
+        const patientName = patient.name?.[0]?.text || 
+                           `${patient.name?.[0]?.family || ''} ${patient.name?.[0]?.given?.join('') || ''}`.trim();
+        
+        // 讀 HbA1c 時間序列（最近 24 筆）
+        const hba1cObs = await fhirClient.request(
+          `Observation?patient=${patientId}&code=${LOINC_CODES.hba1c}&_sort=date&_count=24`
+        );
+        
+        // 讀 eGFR
+        const egfrObs = await fhirClient.request(
+          `Observation?patient=${patientId}&code=${LOINC_CODES.egfr}&_sort=-date&_count=1`
+        );
+        
+        // 計算年齡
+        const birthDate = patient.birthDate;
+        const age = birthDate ? Math.floor((new Date() - new Date(birthDate)) / (365.25 * 24 * 60 * 60 * 1000)) : '?';
+        
+        // 建構 FHIR 病人物件
+        const fhirPatient = {
+          id: patientId,
+          name: patientName || '未知',
+          gender: patient.gender === 'male' ? '男' : patient.gender === 'female' ? '女' : '?',
+          age: age,
+          scenario: 'FHIR 真實病人',
+          target: 7.0, // 預設 ADA 目標
+          latestHba1c: hba1cObs.entry?.[0]?.resource?.valueQuantity?.value || 7.5,
+          egfr: egfrObs.entry?.[0]?.resource?.valueQuantity?.value || 90,
+          bmi: 25, // 暫無 BMI，預設值
+          hba1cSeries: hba1cObs.entry?.map(e => e.resource.valueQuantity?.value || 7.5).slice(0, 24) || [7.5]
+        };
+        
+        loadPatient(fhirPatient);
+        document.getElementById('smartStatus').innerHTML += '<br>✅ FHIR 資料載入完成';
+        
+      } catch (error) {
+        console.error('FHIR 載入失敗:', error);
+        document.getElementById('smartStatus').innerHTML += '<br>⚠️ FHIR 無資料，使用 Demo';
+      }
+    }
+
+    // 3. Demo 卡片渲染
+    function renderSelector() {
+      const container = document.getElementById('patientSelector');
+      container.innerHTML = testPatients.map(p => `
+        <div class="patient-card" onclick="loadPatientById('${p.id}')">
+          <h3>${p.name}</h3>
+          <p>${p.gender}，${p.age}歲</p>
+          <p><strong>${p.scenario}</strong></p>
+          <p>HbA1c ${p.latestHba1c}% (目標 ${p.target}%)</p>
+          <p>ID: ${p.id}</p>
+        </div>
+      `).join('');
+    }
+
+    // 4. 載入病人 UI
+    function loadPatientById(id) {
+      const p = testPatients.find(item => item.id == id);
+      if (p) loadPatient(p);
+    }
+
+    function loadPatient(p) {
+      // UI 切換
+      document.getElementById('patientSelector').style.display = 'none';
+      document.getElementById('selectorTitle').style.display = 'none';
+      document.getElementById('patientContent').style.display = 'block';
+      
+      document.getElementById('patientName').innerText = `${p.name} ${p.gender}，${p.age}歲`;
+      document.getElementById('patientInfo').innerHTML = `
+        ID: ${p.id}<br>
+        BMI: ${p.bmi} | eGFR: ${p.egfr} ml/min | <strong>${p.scenario}</strong>
+      `;
+      
+      renderChart(p.hba1cSeries, p.target);
+      renderIndicators(p);
+      renderRecommendations(p);
+    }
+
+    function backToSelector() {
+      document.getElementById('patientContent').style.display = 'none';
+      document.getElementById('patientSelector').style.display = 'grid';
+      document.getElementById('selectorTitle').style.display = 'block';
+    }
+
+    // 5. Chart.js 趨勢圖
+    function renderChart(data, target) {
+      const ctx = document.getElementById('hba1cChart').getContext('2d');
+      if (myChart) myChart.destroy();
+      
+      const labels = Array.from({length: Math.max(24, data.length)}, (_, i) => `M-${24-i}`);
+      
+      myChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'HbA1c %',
+            data: data,
+            borderColor: '#3498db',
+            backgroundColor: 'rgba(52, 152, 219, 0.1)',
+            tension: 0.4,
+            fill: true
+          }, {
+            label: `目標 ${target}%`,
+            data: Array(Math.max(25, data.length)).fill(target),
+            borderColor: '#e74c3c',
+            borderDash: [5, 5],
+            pointRadius: 0,
+            borderWidth: 2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: { min: 5, max: 12 }
+          },
+          plugins: {
+            title: {
+              display: true,
+              text: 'HbA1c 趨勢 (24個月)'
+            }
+          }
+        }
+      });
+    }
+
+    // 6. 顏色警示指標
+    function renderIndicators(p) {
+      const getColor = (val, target, type) => {
+        if (type === 'hba1c') {
+          return val > target ? 'red' : val > target - 0.5 ? 'yellow' : 'green';
+        }
+        if (type === 'egfr') {
+          return val > 60 ? 'green' : val > 30 ? 'yellow' : 'red';
+        }
+        if (type === 'bmi') {
+          return val < 24 ? 'green' : val < 27 ? 'yellow' : 'red';
+        }
+        return 'green';
+      };
+
+      const html = `
+        <div class="indicator-box">
+          <div>HbA1c</div>
+          <div class="bar ${getColor(p.latestHba1c, p.target, 'hba1c')}">${p.latestHba1c}%</div>
+          <small>目標 ${p.target}%</small>
+        </div>
+        <div class="indicator-box">
+          <div>eGFR</div>
+          <div class="bar ${getColor(p.egfr, 0, 'egfr')}">${p.egfr}</div>
+          <small>ml/min</small>
+        </div>
+        <div class="indicator-box">
+          <div>BMI</div>
+          <div class="bar ${getColor(p.bmi, 0, 'bmi')}">${p.bmi}</div>
+          <small>kg/m²</small>
+        </div>
+      `;
+      document.getElementById('indicators').innerHTML = html;
+    }
+
+    // 7. ADA 2025 CDS 建議
+    function renderRecommendations(p) {
+      let recs = [];
+      
+      // 1. HbA1c 控制
+      if (p.latestHba1c > p.target) {
+        recs.push(`
+          <div class="rec-item rec-high">
+            <strong>⚠️ HbA1c ${p.latestHba1c}% 超過目標 ${p.target}%</strong><br>
+            建議加強血糖控制，評估降糖藥調整
+          </div>
+        `);
+      } else {
+        recs.push(`
+          <div class="rec-item rec-good">
+            <strong>✅ HbA1c ${p.latestHba1c}% 已達目標</strong><br>
+            持續維持並定期追蹤
+          </div>
+        `);
+      }
+      
+      // 2. ADA SGLT2i 建議 (eGFR > 30)
+      if (p.egfr > 30) {
+        recs.push(`
+          <div class="rec-item">
+            <strong>💊 ADA 建議 SGLT2i</strong><br>
+            eGFR ${p.egfr} > 30，適合心腎保護（心衰/CKD）
+          </div>
+        `);
+      }
+      
+      // 3. ADA GLP-1 RA 建議 (BMI > 27)
+      if (p.bmi > 27) {
+        recs.push(`
+          <div class="rec-item">
+            <strong>💉 ADA 建議 GLP-1 RA</strong><br>
+            BMI ${p.bmi} > 27，適合減重+心血管保護
+          </div>
+        `);
+      }
+      
+      document.getElementById('recommendations').innerHTML = recs.join('');
+    }
+  </script>
+</body>
+</html>
